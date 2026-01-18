@@ -1,5 +1,5 @@
 import { useSync } from "@tui/context/sync"
-import { createMemo, For, Show, Switch, Match } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Show, Switch, Match } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useTheme } from "../../context/theme"
 import { Locale } from "@/util/locale"
@@ -10,21 +10,76 @@ import { Installation } from "@/installation"
 import { useKeybind } from "../../context/keybind"
 import { useDirectory } from "../../context/directory"
 import { useKV } from "../../context/kv"
+import { useRoute } from "../../context/route"
 import { TodoItem } from "../../component/todo-item"
+import "opentui-spinner/solid"
 
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const sync = useSync()
   const { theme } = useTheme()
+  const route = useRoute()
   const session = createMemo(() => sync.session.get(props.sessionID)!)
   const diff = createMemo(() => sync.data.session_diff[props.sessionID] ?? [])
   const todo = createMemo(() => sync.data.todo[props.sessionID] ?? [])
   const messages = createMemo(() => sync.data.message[props.sessionID] ?? [])
+
+  const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+  const formatSubagent = (title: string) => {
+    const match = title.match(/^(.+?)\s*\(@(\w+)\s+subagent\)$/)
+    if (!match) return Locale.truncateMiddle(title, 30)
+    const [, desc, agent] = match
+    const maxDesc = 28 - agent.length
+    const truncated = desc.length > maxDesc ? desc.slice(0, maxDesc - 1) + "…" : desc
+    return `${agent}: ${truncated}`
+  }
+
+  const runningSubagents = createMemo(() =>
+    sync.data.session
+      .filter((s) => s.parentID === props.sessionID)
+      .filter((s) => sync.data.session_status[s.id]?.type === "busy")
+      .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  )
+
+  const [completed, setCompleted] = createSignal<{ id: string; title: string }[]>([])
+  const seen = new Set(
+    sync.data.session
+      .filter((s) => s.parentID === props.sessionID)
+      .filter((s) => sync.data.session_status[s.id]?.type === "idle")
+      .map((s) => s.id),
+  )
+
+  createEffect(() => {
+    const children = sync.data.session.filter((s) => s.parentID === props.sessionID)
+    for (const child of children) {
+      const status = sync.data.session_status[child.id]?.type
+      if (status === "idle" && !seen.has(child.id)) {
+        seen.add(child.id)
+        setCompleted((c) => [...c, { id: child.id, title: child.title }])
+        setTimeout(() => {
+          setCompleted((c) => c.filter((x) => x.id !== child.id))
+        }, 3000)
+      }
+    }
+  })
+
+  const allSubagents = createMemo(() => [
+    ...runningSubagents().map((s) => ({ ...s, status: "running" as const })),
+    ...completed().map((c) => ({
+      id: c.id,
+      title: c.title,
+      status: "completed" as const,
+    })),
+  ])
+
+  const [hovered, setHovered] = createSignal<string | null>(null)
 
   const [expanded, setExpanded] = createStore({
     mcp: true,
     diff: true,
     todo: true,
     lsp: true,
+    subagents: true,
   })
 
   // Sort MCP servers alphabetically for consistent display order
@@ -217,6 +272,46 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 </box>
                 <Show when={todo().length <= 2 || expanded.todo}>
                   <For each={todo()}>{(todo) => <TodoItem status={todo.status} content={todo.content} />}</For>
+                </Show>
+              </box>
+            </Show>
+            <Show when={allSubagents().length > 0}>
+              <box>
+                <box
+                  flexDirection="row"
+                  gap={1}
+                  onMouseDown={() => allSubagents().length > 2 && setExpanded("subagents", !expanded.subagents)}
+                >
+                  <Show when={allSubagents().length > 2}>
+                    <text fg={theme.text}>{expanded.subagents ? "▼" : "▶"}</text>
+                  </Show>
+                  <text fg={theme.text}>
+                    <b>Subagents</b>
+                  </text>
+                </box>
+                <Show when={allSubagents().length <= 2 || expanded.subagents}>
+                  <For each={allSubagents()}>
+                    {(s) => (
+                      <box
+                        flexDirection="row"
+                        gap={1}
+                        onMouseOver={() => setHovered(s.id)}
+                        onMouseOut={() => setHovered(null)}
+                        onMouseDown={() => route.navigate({ type: "session", sessionID: s.id })}
+                        backgroundColor={hovered() === s.id ? theme.backgroundElement : undefined}
+                      >
+                        <Show when={s.status === "running"} fallback={<text fg={theme.success}>✓</text>}>
+                          <Show
+                            when={kv.get("animations_enabled", true)}
+                            fallback={<text fg={theme.textMuted}>[⋯]</text>}
+                          >
+                            <spinner frames={spinnerFrames} interval={80} color={theme.primary} />
+                          </Show>
+                        </Show>
+                        <text fg={theme.text}>{formatSubagent(s.title)}</text>
+                      </box>
+                    )}
+                  </For>
                 </Show>
               </box>
             </Show>
